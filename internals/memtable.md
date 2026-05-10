@@ -193,7 +193,7 @@ records. On startup, `memtable::replay_wal` reconstructs in-flight writes
 from the most recent WAL epoch.
 
 WAL files are intentionally **not opened with `O_DIRECT`**: writing through
-the page cache means each insert doesn't require a disk round-trip — the OS
+the page cache means each insert doesn't require a disk round-trip: the OS
 holds the data in RAM and flushes asynchronously. This protects against
 application crashes (the OS still owns the data), though not against power
 loss. It's an acceptable middle ground for the current prototype stage of

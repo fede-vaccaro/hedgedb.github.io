@@ -14,7 +14,7 @@ considered production-ready.
 
 *Optional but highly recommended:*
 
-- [`hwloc`](https://www.open-mpi.org/projects/hwloc/) for CPU-aware thread localization — `sudo apt install hwloc`
+- [`hwloc`](https://www.open-mpi.org/projects/hwloc/) for CPU-aware thread localization (`sudo apt install hwloc libhwloc-dev`)
 - A concurrency-friendly memory allocator like
   [`jemalloc`](https://github.com/jemalloc/jemalloc) or
   [`tcmalloc`](https://github.com/google/tcmalloc)

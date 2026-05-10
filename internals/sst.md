@@ -28,7 +28,7 @@ positional mapping between a second level index entry and an index block: a `low
 ### Approximate Probabilistic Membership filters
 
 HedgeDB employs **Quotient filters**. Quotient filters can be more memory
-expensive than — for instance — the traditional Bloom filter, but they have
+expensive than the traditional Bloom filter, for instance, but they have
 good **spatial locality**, hence less RAM hops are needed, making it faster
 at scale.
 
@@ -83,7 +83,7 @@ It gets compressed to
 #3 - "0fff-1010" -> "a-1010" <- shares "0ff" prefix of length 2 with key #2
 ```
 
-This is particularly convenient with — as is common practice — 24-byte keys
+This is particularly convenient with the common practice of 24-byte keys
 formed by concatenating a `partition key` (a 16-byte UUID or hash) and an
 8-byte `clustering key`: the `partition key` forms a repeated pattern that
 compresses well under this scheme.
@@ -133,15 +133,15 @@ its band:
 
 | Key prefix range | Partition ID |
 |------------------|--------------|
-| 0x0000–0x0FFF    | 0x0FFF       |
-| 0x1000–0x1FFF    | 0x1FFF       |
+| 0x0000-0x0FFF    | 0x0FFF       |
+| 0x1000-0x1FFF    | 0x1FFF       |
 | ...              | ...          |
-| 0xF000–0xFFFF    | 0xFFFF       |
+| 0xF000-0xFFFF    | 0xFFFF       |
 
 :::{important}
 **Design constraint.** If keys aren't uniformly distributed over their
 first two bytes (e.g. all keys share a prefix), partitions become
-unbalanced — and the imbalance cascades: compaction and flush parallelism
+unbalanced, and the imbalance cascades: compaction and flush parallelism
 degrade, level-size targets within an overloaded partition fall behind, and
 the per-SST quotient filter sizing drifts off-target. HedgeDB is optimized
 for UUIDs, hashes, or other uniformly-distributed keys; if your keys don't
@@ -185,7 +185,7 @@ More in detail:
 maintained, which is incremented on every `put` operation (insertion,
 update, or delete). When a range iterator is initialized, the current SeqNo
 is atomically loaded, and every record with a SeqNo greater than the
-snapshot is skipped — the user does not see it at all.
+snapshot is skipped, so the user does not see it at all.
 
 - at the **SST level** (and block level), only the highest SeqNo is serialized into the SST footer: during flush, only the latest version of a key is written and the other are discarded. When merging multiple SSTs, if a key has multiple versions, only the most recent is kept thus preserving the **key uniquess** property. The range iterator acquires a full snapshot of the SSTs belonging to a specific partition. Once flushed, any SST is **immutable**, the reader has a consistent view over the stored records. At runtime, SSTs and the underlying file descriptors are reference counted by their observers, and the removal from filesystem is deferred until the reference count drops to zero, i.e. until the last observer has finished.
 

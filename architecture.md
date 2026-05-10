@@ -4,7 +4,7 @@
 
 ## *The Hedge Manifesto*
 
-HedgeDB started from two motivations: wanting a leaner codebase than the general-purpose engines on offer, and wanting to see how much throughput a modern NVMe will actually give you when you design around it. The principles below follow from those two pressures — each is less a preference than a consequence of taking them seriously:
+HedgeDB started from two motivations: wanting a leaner codebase than the general-purpose engines on offer, and wanting to see how much throughput a modern NVMe will actually give you when you design around it. The principles below follow from those two pressures, and each is less a preference than a consequence of taking them seriously:
 
 - **Async I/O**: Modern NVMes achieve maximum throughput at high Queue Depth
   (32 or even 64). Synchronous systems leave a lot of resources on the table.
@@ -16,7 +16,7 @@ HedgeDB started from two motivations: wanting a leaner codebase than the general
   around, and wanted something leaner.
 - **Write-intensive workloads**: high write throughput as one of the primary
   design constraints.
-- **Uniform key distribution**: Our workload — like many others — involves
+- **Uniform key distribution**: Our workload, like many others, involves
   uniformly distributed random keys (like hashes or UUIDs); designing around
   this constraint opens many optimization opportunities.
 - **Direct I/O**: Skipping Linux' page cache makes the code harder to write,
@@ -40,7 +40,7 @@ RocksDB (and LevelDB before it) pioneered the LSM-tree approach for
 **write-heavy workloads**. Most engines like
 [LMDB](https://www.openldap.org/software/repo.html) (or almost any SQL
 Engine) use B-trees, which are fast for reads but write directly to their
-sorted on-disk position — every insert requires a random I/O to find and
+sorted on-disk position, so every insert requires a random I/O to find and
 modify the right leaf page. While very efficient for read operations, for
 write-heavy workloads this becomes a bottleneck as one single new record
 might cause 3 page writes. There are approaches to mitigate this, but the
@@ -59,9 +59,9 @@ The write path involves mostly **sequential writes**, and basically any form
 of secondary storage (HDD, SATA SSD, NVMes but even DRAM) exhibits **the
 best throughput** at sequential I/O.
 
-The trade-off is that reads become more complex — you may need to check
-multiple SST files (*spoiler: there is an effective work-around for that*) —
-but for write-heavy workloads, this is a winning bet.
+The trade-off is that reads become more complex: you may need to check
+multiple SST files (*spoiler: there is an effective work-around for that*).
+But for write-heavy workloads, this is a winning bet.
 
 ```{image} /_static/lsm-tree-scheme.png
 :alt: Overview of the LSM-tree data structure and its components
@@ -161,8 +161,8 @@ the most recent value associated with a key:
 
 These are the standard LSM-tree building blocks. The internals section covers how HedgeDB specifically implements each of them:
 
-- **[Async model](internals/async-model.md)** — every I/O is a `co_await` backed by `io_uring`; no callbacks, no thread-per-request.
-- **[Memtable & WAL](internals/memtable.md)** — double-buffered memtable with a custom `rw_sync` primitive; per-thread WAL files to eliminate inode contention.
-- **[SST & partitioning](internals/sst.md)** — prefix-compressed 4 KB index blocks, quotient filters, and a partitioned key space for parallel flush and compaction.
-- **[Compaction](internals/compaction.md)** — size-tiered strategy with a semaphore-based permission chain to keep parallel compactions temporally consistent.
-- **[Direct I/O](direct-io.md)** — `O_DIRECT` on the SST path for predictable latencies and transparent memory usage.
+- **[Async model](internals/async-model.md):** every I/O is a `co_await` backed by `io_uring`; no callbacks, no thread-per-request.
+- **[Memtable & WAL](internals/memtable.md):** double-buffered memtable with a custom `rw_sync` primitive; per-thread WAL files to eliminate inode contention.
+- **[SST & partitioning](internals/sst.md):** prefix-compressed 4 KB index blocks, quotient filters, and a partitioned key space for parallel flush and compaction.
+- **[Compaction](internals/compaction.md):** size-tiered strategy with a semaphore-based permission chain to keep parallel compactions temporally consistent.
+- **[Direct I/O](direct-io.md):** `O_DIRECT` on the SST path for predictable latencies and transparent memory usage.

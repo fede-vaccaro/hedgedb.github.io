@@ -39,18 +39,20 @@ NVMe SSDs and modern CPUs.
 
 HedgeDB is an LSM-Tree engine designed to saturate the NVMe device. Inspired by RocksDB, the engine targets write-heavy workloads with uniformly-distributed keys (UUIDs, hashes), and is structured around:
 
-- **Concurrent execution.** `io_uring` + C++20 coroutines via the [TooManyCooks](https://github.com/tzcnt/TooManyCooks)
-  work-stealing scheduler. Every I/O is a `co_await`; no callbacks, no thread-per-request.
-- **Partitioned LSM-tree.** The key space is sharded into `2^N` independent partitions
-  (default 16 partitions). Compactions on different partitions run fully in parallel.
+- **Asynchronous execution.** `io_uring` + C++20 coroutines via [TooManyCooks](https://github.com/tzcnt/TooManyCooks),
+  a work-stealing scheduler. This allows to perform I/O batching and switching context within user-space.
+- **Partitioned LSM-tree.** The key space is sharded into `2^N` independent
+  partitions (default 16). Compactions on different partitions run fully in parallel.
 - **Size-tiered compaction.** Lower write amplification than leveled, with a
   quotient filter on the read path to skip SSTs that can't contain a key.
-- **Per-thread WAL.** Each writer thread owns its own WAL file — no inode contention.
-- **Direct I/O.** files opened with `O_DIRECT` flag on the SST path: predictable latencies and no opaque [OS-managed cache](direct-io.md) layer or buffering.
-- **MVCC**: HedgeDB implements MVCC for snapshot isolation over range scans.
+- **Per-thread WAL.** Each writer thread owns its own WAL file, no inode
+  contention on the hot path.
+- **Direct I/O.** reads, flush and compactions use `O_DIRECT`: predictable latencies
+  and transparent memory usage, with no IO stalls from [page-cache](direct-io.md) pressure.
+- **MVCC.** Snapshot isolation over range scans.
 
 :::{warning}
-HedgeDB is currently a prototype and there are a few known gaps. The codebase features a set of test cases, and it's been extensively tested with sanitizers on. However, it has never been tested in any production environment.
+HedgeDB is currently a prototype and there are a few known gaps. The codebase has a set of test cases, and it's been tested extensively with sanitizers on. It has never run in any production environment, though.
 :::
 
 ---
@@ -95,9 +97,9 @@ through the bundled benchmark CLI:
 # Bump the FD limit (HedgeDB keeps many SST files open)
 ulimit -n 1048576
 
-# Write 1M keys with 100-byte values, then read them back
-./build/benchtool -m write -n 1000000 -v 100 -p /tmp/hedge_demo
-./build/benchtool -m read  -n 1000000 -v 100 -p /tmp/hedge_demo
+# Load 10M keys with 100-byte values, then read them back
+./build/benchtool -m load -n 10000000 -v 100 -p /tmp/hedge_demo
+./build/benchtool -m read  -n 10000000 -v 100 -p /tmp/hedge_demo
 ```
 
 ### Hello world from the API
@@ -171,28 +173,28 @@ int main()
 
 HedgeDB is a **prototype**. Things that aren't here yet:
 
-- **Full-fledged crash recovery** — WAL replay works, but partial-write and
+- **Full-fledged crash recovery.** WAL replay works, but partial-write and
   corrupted-file edge cases aren't handled.
-- **Battle-testing & hardening** — never run against real-world workloads
-  or for long execution periods.
-- **Cross-platform support** — Linux only (`io_uring`).
-- **Block compression** — many workloads would see meaningful size, space,
-  and write-amplification reduction from lossless compression.
-- **Batched operations** — no batch put/get APIs to amortize call overhead.
-- **Column families** — single keyspace per database.
-- **Large values support** — if `key.size() + value.size()` (a bit less than 4KB) exceeds the index-block
-  page size, the flush will break.
+- **Battle-testing & hardening.** Never run against real-world workloads
+  or for long stretches.
+- **Cross-platform support.** Linux only (`io_uring`).
+- **Block compression.** Many workloads would see real space and
+  write-amplification savings from lossless compression.
+- **Batched operations.** No batch put/get APIs yet to amortize call overhead.
+- **Column families.** One keyspace per database.
+- **Large values support.** If `key.size() + value.size()` (a bit less than 4KB) exceeds the index-block
+  page size, the flush breaks.
 
 ## Future plans
 
-- **Hyper-Clock Cache** — approximate LRU Cache that trades counting precision
-  for a faster algorithm — and works well with Direct I/O.
-- **Key-value separation** — SSTs would store keys + pointers, with values
-  in separate append-only `.vlog` files; dramatically reduces value
-  write-amplification during compaction (paired with a GC story).
-- **Rate-limiting** — soft-stall writes when L0 SSTs cross a threshold,
-  smoothing long-tail latencies due to compaction backlog.
-- *Rewrite in Rust?* — 👀
+- **Hyper-Clock Cache.** An approximate LRU cache that trades counting precision
+  for speed, and plays well with Direct I/O.
+- **Key-value separation.** SSTs would store keys plus pointers, with values
+  in separate append-only `.vlog` files. This cuts value write-amplification
+  during compaction a lot (paired with a GC story).
+- **Rate-limiting.** Soft-stall writes when L0 SSTs cross a threshold,
+  smoothing the long-tail latencies that come from compaction backlog.
+- *Rewrite in Rust?* 👀
 
 ---
 
@@ -200,7 +202,7 @@ HedgeDB is a **prototype**. Things that aren't here yet:
      version on each release. -->
 
 Built and maintained by [Federico Vaccaro](https://github.com/fede-vaccaro).
-Questions, ideas, or war stories — open an
+Questions, ideas, or war stories? Open an
 [issue](https://github.com/fede-vaccaro/HedgeDB/issues) or reach out via GitHub.
 
 _Last updated: 2026-05-10 · Version: prototype (v0.0.1)_

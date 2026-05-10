@@ -6,7 +6,7 @@ This does not mean that enabling Direct I/O is the wrong choice, but any enginee
 
 The Linux default is going through the Page Cache for disk I/O operations. Other than sparing the developer annoying alignment conversions, the Page Cache as a double-sided role, depending from the _writer_ or _reader_ perspective.
 
-Let's delve into both with some experiments.
+Both are worth a closer look, so here are some experiments.
 
 _Note: Before each of the experiment that follows, the page cache has been drained with_
 
@@ -184,4 +184,4 @@ Also, you will notice that there is some tension between how the Write and the R
 
 While buffered writes have some heavy countersides due to the async `kflusher` machinery, there could be many cases where it is still convenient to be backed from the page cache. Plus, it's worth noticing that through `madvise` is possible to instruct the kernel on the needed access pattern.
 
-Finally, the most common solution is offering a custom cache implementation that lives in user space and manages its own eviction policy — giving the engineer full visibility and control over what stays hot in memory, independent of the OS.
+Finally, the most common solution is offering a custom cache implementation that lives in user space and manages its own eviction policy. That gives the engineer full visibility and control over what stays hot in memory, independent of the OS.

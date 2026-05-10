@@ -65,15 +65,15 @@ HedgeDB's per-request latency is higher than RocksDB's despite its 5.3× through
 
 | Range size | Metric | HedgeDB | RocksDB | HedgeDB / RocksDB |
 |---|---|---:|---:|---:|
-| Small  (1–100)     | scans/s | **87.5K** | 26.3K   | **3.3×** |
-| Small  (1–100)     | keys/s  | **4.38M** | 1.32M   | **3.3×** |
-| Medium (512–1024)  | scans/s | **24.9K** | 6.7K    | **3.7×** |
-| Medium (512–1024)  | keys/s  | **19.2M** | 5.12M   | **3.7×** |
-| Large  (114K–131K) | scans/s | **240**   | 192     | **1.25×** |
-| Large  (114K–131K) | keys/s  | **29.5M** | 23.7M   | **1.25×** |
+| Small  (1-100)     | scans/s | **87.5K** | 26.3K   | **3.3×** |
+| Small  (1-100)     | keys/s  | **4.38M** | 1.32M   | **3.3×** |
+| Medium (512-1024)  | scans/s | **24.9K** | 6.7K    | **3.7×** |
+| Medium (512-1024)  | keys/s  | **19.2M** | 5.12M   | **3.7×** |
+| Large  (114K-131K) | scans/s | **240**   | 192     | **1.25×** |
+| Large  (114K-131K) | keys/s  | **29.5M** | 23.7M   | **1.25×** |
 
-Small and medium scans favor HedgeDB by ~3.3–3.7×. Very large scans
-converge — at that range size both engines are bottlenecked by sequential
+Small and medium scans favor HedgeDB by ~3.3-3.7×. Very large scans
+converge: at that range size both engines are bottlenecked by sequential
 SSD bandwidth, not the index structure.
 
 ## Memory (peak RSS)
@@ -85,7 +85,7 @@ SSD bandwidth, not the index structure.
 | Range scans            | 633 MB | 1.30 GB |
 | Mixed 50/50 read-write | 1.82 GB | 1.89 GB |
 
-HedgeDB uses more memory during load — the memtable holds pending writes
+HedgeDB uses more memory during load, since the memtable holds pending writes
 before they flush to SSTs. On the read path it is significantly lighter:
 the SST index cache is demand-filled and shares nothing with the OS page
 cache (all reads go through `O_DIRECT`), so memory usage tracks actual

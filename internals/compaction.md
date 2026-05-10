@@ -73,8 +73,8 @@ This can be better explained with an example.
 4. C and D get merged first (into "CD") and immediately pushed to L1; A and
    B (into "AB") follow.
 5. Now the L1 ordering is `[CD, AB]`.
-6. **Error**: when looking up `K`, AB is read first and `K_A` is retrieved
-   — but `K` had been deleted by `K_C`!
+6. **Error**: when looking up `K`, AB is read first and `K_A` is retrieved,
+   but `K` had been deleted by `K_C`!
 
 The solution is the same **semaphore-based permission chain** used by the
 flush path: each compaction job for a given level acquires a semaphore
