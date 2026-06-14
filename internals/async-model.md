@@ -60,9 +60,9 @@ Previous efforts in the same direction of coroutine-based database are most nota
 
 ## I/O Batching
 
-As mentioned, NVMes present the highest throughput (*nb. it costs higher latency*) at Queue Depth 32/64,
-i.e. more concurrent requests can be batched to be processed concurrently
-from the device. HedgeDB's concurrency model based on coroutines allows to integrate
+As mentioned, NVMes present the highest throughput (*nb. it costs higher latency*) at high _Queue Depth_ (e.g. 512 outstanding requests),
+i.e. the number of requests that can be submitted concurrently in order to exploit the internal parallelism
+of the device. HedgeDB's concurrency model based on coroutines allows to integrate
 batching quite seamlessly. I/O requests filed from the same thread can be batched
 while still writing code that is quite close to the sequential/blocking
 version.
