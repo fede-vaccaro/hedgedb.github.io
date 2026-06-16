@@ -178,7 +178,7 @@ With this quick experiment, is now clear that the page cache comes with a overhe
 
 ### Which mode does HedgeDB defaults to?
 
-At this point, given the provided experimental evidence, and given the willingness of being [transparent about memory](architecture.md#the-hedge-manifesto) it should be clear now on why HedgeDB defaults on Direct I/O (_with an exception to this rule when dealing with [WAL](internals/memtable.md#per-thread-write-ahead-logs)_).
+At this point, given the provided experimental evidence, and given the willingness of being [transparent about memory](architecture.md#the-hedge-manifesto) it should be clear now on why HedgeDB defaults on Direct I/O (_with an exception to this rule when dealing with [WAL](internals/memtable.md#details-about-the-write-ahead-log)_).
 
 Also, you will notice that there is some tension between how the Write and the Read path operates.
 

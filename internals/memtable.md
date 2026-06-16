@@ -1,211 +1,325 @@
-# Memtable Swap and Per-Thread WAL
+# Deep dive into the Write Path: from the Memtable to Level 0 
 
-:::{note}
-Glossary for this section: a thread performing an insert operation is
-referred to as a "Writer thread" or just "Writer", and the threads
-performing the flush from memtable to SST are referred to as the "Flusher
-thread" or just "Flusher".
-:::
+This section covers HedgeDB's write path: how data flows from a `put(key, value)` call to a Level 0 SST on disk, with a focus on the concurrency design that keeps parallel writes fast.
 
-## The Concurrent Skip List
 
-**Skiplists** are a natural fit for memtables: they are **sorted associative
-data structures**, are "upgradable" to support concurrent reads and writes,
-and provide `O(log n)` lookups and inserts. HedgeDB uses a **concurrent skip
-list** (`src/db/skiplist/`). While
-[this algorithm](https://people.csail.mit.edu/shanir/publications/OPODIS2006-BA.pdf)
-is technically not lock-free, it basically behaves as if it were but with
-less complexity. The implementation is extracted from
-[Folly](https://github.com/facebook/folly/blob/main/folly/ConcurrentSkipList.h).
+## Memtables and WALs
 
-See the *Failed experiments* section for the path that led to this choice.
+### Brief recall
 
-## Double-Buffered memtable
+The **Memtable** is the in-memory data structure of the LSM-tree holding the most recent 
+Key-Values. Similarly to an LRU-Cache, the Memtable is the first area being checked on look-up operations. It also acts
+as a buffer to amortize insertion cost; of course, it cannot grow indefinitely, but only up to a pre-defined capacity,
+usually in the 16-128 MB range. After it gets full, the Memtable is flushed to disk (and transformed to an SST). 
+This fresh SST file is now ready to be pushed to LSM-tree Level 0.
 
-The HedgeDB memtable implementation handling cannot be labeled lock-free
-because it *will block* under pressure, although there is a widespread usage
-of **atomics** for fast synchronization between threads.
+To ensure persistency, every new insertion is appended to a file on disk, the **Write-Ahead Log**:
+this way, on crash or power-loss events, _replaying_ the WAL allows restoring the database's
+state just before it crashed.
 
-The memtable class maintains **two memtable instances**: the active memtable
-and the pipelined memtable. Only the active one accepts operations, while
-the pipelined one sits there, ready to be used. When the active memtable
-gets full, the threads race to acquire the mutex protecting the flush
-section:
+### Memtable and WAL organization
 
-- The **winner** swaps the consumed memtable with the pipelined one (double
-  buffering), and triggers the flush on the background pool.
-- The **other threads** briefly spin for a few iterations, waiting for the
-  new memtable to become active; after the expiration of the number of
-  trials, they will block.
-- The pipelined slot is now empty, and one of the background threads
-  receives the task of instantiating a new memtable to replace the spot.
-
-This cannot continue indefinitely: eventually compactions will lag behind
-flushes (or, less likely, the flushes themselves will lag behind the inbound
-traffic). This causes a number of pending flush jobs to pile up.
-
-:::{admonition} Q: What happens if the flush job lags behind the inbound traffic? Does memory grow indefinitely?
-:class: tip
-**A:** No, there is a hard limit on how many pending flushes are allowed
-(config: `max_pending_flushes`). When this limit is reached, new writes are
-blocked.
-:::
-
-:::{admonition} Q: What if compaction jobs lag behind the flush jobs then?
-:class: tip
-**A:** You have two choices: accumulating read amplification (because more
-and more SSTs are piling up in L0) or **applying backpressure**. HedgeDB by
-default applies backpressure if a threshold of SSTs in L0 is exceeded. More
-on the backpressure mechanism later.
-:::
-
-## Fast Writers and Flusher Synchronization
-
-One of HedgeDB's most sophisticated mechanisms is how it handles memtable
-flushes **without blocking concurrent writers**. This is critical for
-maintaining high write throughput *and* strict memory safeguards during
-flush operations.
-
-### The challenge with multiple Writers
-
-First, let's consider this pseudocode taken from the section of the write
-path:
-
-```text
-new_size = memtable->size.atomic_add(key_value.size())
-if new_size > limit
-    flush(memtable)
-else
-   memtable->insert(key_value)
+```{image} /_static/concurrent-writers.png
+:alt: Memtable and WAL architecture
+:align: center
+:width: 100%
 ```
 
-Now, let's consider two threads, T1 and T2 that runs concurrently and the
-following situation:
+In the image above is exemplified the Memtable WAL architecture in HedgeDB: the Memtable is shared 
+and accepts parallel writes by multiple threads. Each thread appends to its own WAL file, minimizing lock 
+contention at file-descriptor level. 
 
-1. `size` = 64; `limit` = 128
-2. T1 wants to add a `key_value` with size 64 -> `memtable->size` is now `128`
-3. T1 gets preempted by the OS scheduler
-4. T2 wants to add a `key_value` with size 32 -> `memtable->size` is now `160`
-5. T2 detects that the memtable is full and triggers the flush of `memtable-0` and swap it to `memtable-1`
-6. The flusher thread is building the `sst` while iterating the `memtable-0`
-7. T1 resumes and update the `memtable-0`
-8. T2 writes on `memtable-1`
-9. Error! **T1 updates the memtable** while the flusher assumes it has a
-   read-only view on it.
+### Double-Buffered Memtable
 
--> **DATA LOSS: the flusher has finished and missed the write from T1**
+In HedgeDB every insertion is directed to the **Active Memtable** (and the associated WALs), but there is also a second
+**Pipelined Memtable**. Both Active and Pipelined Memtable have their own set of WAL files. When the Active Memtable
+is scheduled for being **flushed**, the Pipelined **gets promoted** to the Active (which is implemented just as an exchange
+operation) and the Writers can continue operating with very negligible wait time. 
 
-How do we prevent this issue?
+This impacts performance positively: the job of allocating the Pending and resetting the WAL files involves a few syscalls
+that might be expensive, so the Pending Memtable is prepared **asynchronously** from a background worker.
 
-HedgeDB solves this problem using a custom synchronization primitive
-internally called `rw_sync` which is a declination of the Read-Copy-Update
-**Quiescent-State Based Reclamation** (QSBR) with distributed Reference
-Counting: `rw_sync`.
 
-What's happening from both actors (Writers and Flusher) perspective is that:
+## The Put Operation state machine
 
-- the Writers temporarily acquire the memtable before updating it by
-  increasing the active writers counter;
-- A boolean flag indicates whether is possible to acquire the memtable and
-  modify it (or, "frozen");
-- the Flusher *freezes* the memtable and waits for the writer counter to
-  become zero.
+The following diagram describes the `Put` operation state machine needed for coordinating the Memtable 
+updates and flushes between parallel threads.
+
+```{image} /_static/writer-sm.png
+:alt: Writer state machine representation
+:align: center
+:width: 100%
+```
+_The actual implementation in [memtable.cc](https://github.com/fede-vaccaro/HedgeDB/blob/b2785cab4d35fe1784eb11ac7de9ae93ce6679c4/src/db/memtable.cc) 
+might slightly differ from what is illustrated here._
+
+### Insertion steps
+#### 1. Acquire Write Token
+
+The first step is acquiring a **Write Token** for updating the Memtable. 
+
+This step fails if this Memtable was "frozen": after freezing it, any further insertion is forbidden. Memtables are 
+frozen right before triggering a **flush**: of course, the Flusher Worker expects that the Memtable is in a Read-Only 
+state. 
+
+The Write Tokens are implemented using a synchronization scheme inspired from Read-Copy-Update: 
+[rw_sync](https://github.com/fede-vaccaro/HedgeDB/blob/9a7d11e601f7d19d0990a929a3aca394a53c90cf/src/async/rw_sync.h).
+Its implementation is discussed in the [Writers-Reader synchronization section](#fast-writers-and-flusher-synchronization-with-rw_sync)
+
+#### 2. Wait for the new Memtable
+
+In case the Token acquisition fails, the thread waits for the Pipelined Memtable to become Active.
+In detail, it first tries polling for the new Memtable for a fixed number of retries (with max 4 retries); 
+if the new Memtable is not available yet within this limit, the thread **yields control** to another
+coroutine until it's signaled. 
+
+#### 3. Skiplist & WAL Insertion
+
+The actual insertion takes place: the (global) Sequence Number is increased, the Bytes Written count
+for the Active Memtable is updated, the Key-Value pair is inserted into the Skiplist and the entry is finally appended 
+to WAL. 
+
+#### 4. Token Release
+The Write Token is released, and if a Flush operation is triggered, it will commence the Flush as soon as every thread
+has released its token.
+
+### Trigger Flush steps
+
+When the Active Memtable reaches full capacity, the flush operation is triggered but this involves some synchronization
+work between threads. 
+
+The "Happy Path" is implemented to be as fast as possible through a series of simple atomic operations. 
+
+#### 1. Buffer Capacity Reached 
+
+If any thread detects that the number of Bytes Written (written to the Active Memtable) exceeds the configured Max Size, 
+it will try to trigger the flush job of the currently Active Memtable onto the Flusher Workers Pool.
+
+#### 2. Exclusive Trigger
+
+More threads might try to trigger the flush procedure, but only the one which wins the race will (the behavior is similar
+to [std::call_once](https://en.cppreference.com/cpp/thread/call_once)).
+
+#### 3. Pending Flushes Check
+
+The thread increases the number of Pending Flushes, i.e. the number of Memtable that are queued for flush. The Flush
+operation will not be triggered if the Pending Flushes counter is above the Max Pending Flushes (as from configuration)
+threshold. In this case, the thread will wait until a slot is available. The counter and the signaling are implemented 
+through a `tmc::semaphore`. 
+
+Notice that this operation blocks the current coroutine; also, since the next step is exchanging
+the Active Memtable with the Pipelined, this might backpressure into blocking any thread from doing further insertions.
+
+This might happen if the underlying storage device is not keeping up with the inbound data flow, and new writes
+are stopped to protect main memory consumption.
+
+#### 4. Trigger Flush
+
+Assuming that the Pipelined Memtable is already available (if not, the thread waits for it), 
+The Active Memtable is frozen in order to prevent new writes (freezing is a single atomic operation). Then, the Active 
+Memtable is exchanged with the Pipelined Memtable, that in turn becomes the Active one. If there was any waiting Writer thread,
+now it is free again to let the data flow.
+
+Finally, the actual Flush-to-disk job, in which the Memtable is **written to disk** as SST file, is **deferred** to the Flush 
+Worker Pool (see next section) and the thread can go back to other tasks.
+
+### Flusher steps
+
+```{image} /_static/flusher.png
+:alt: Flusher state machine
+:align: center
+:width: 100%
+```
+
+#### 1. Wait for Memtable to be in Read Only
+
+Before starting to flush the Memtable to filesystem into an SST, the Flusher must wait any Write Token to be released.
+Following, because the Memtable was frozen, the Write Token cannot be acquired anymore. This implies that the time
+spent waiting is negligible.
+
+#### 2. Flush to SST
+
+The Flush Worker actually writes the Memtable to disk. The process consists of iterating for every key-value (the Skiplist is
+already ordered) and progressively building the SSTs Index Blocks.
+
+#### 3. Wait for permission for pushing to L0
+
+In order to increase performance, multiple Workers can process the Flush jobs in parallel;
+however, each LSM-Tree level is organized as a vector of SSTs, inversely sorted by SST age (the most recent SST is the
+last item). In order to keep L0 temporally consistent, the Workers must push following the respective Memtable arrival 
+order. To enforce this constraint, a [permission passing scheme](#permission-chain-for-concurrency-and-temporal-consistency)
+is adopted. 
+
+#### 4. Manifest Update
+
+The Manifest file, containing the mapping between LSM-tree levels and files, is updated and `fsync`-ed. 
+
+#### 5. Reset WAL files & clear Skiplist
+
+Now that the SST has been built, and the Manifest updated, the Memtable can be considered fully persisted. 
+The WAL files can be reset and are ready to be reused, and the memory allocated by the Skiplist is freed.
+
+#### 6. Release `PendingFlushes`
+
+The last step is releasing the PendingFlushes semaphore. This signal might potentially unlock a coroutine waiting on it,
+thus relieving backpressure.
+
+## Memtable implementation in HedgeDB
+
+HedgeDB uses a **Concurrent Skiplist** ([`src/db/skiplist/`](https://github.com/fede-vaccaro/HedgeDB/tree/b2785cab4d35fe1784eb11ac7de9ae93ce6679c4/src/db/skiplist/concurrent_skip_list))
+as the Memtable.
+The implementation is extracted from Meta's [Folly](https://github.com/facebook/folly/blob/main/folly/ConcurrentSkipList.h).
+
+The **Skiplist** is a natural fit for Memtables and a typical choice among LSM-tree-based databases: 
+it is a  **sorted associative data structure**, it is "upgradable" to support concurrent reads and writes,
+and provides `O(log n)` lookups and inserts. While [this algorithm](https://people.csail.mit.edu/shanir/publications/OPODIS2006-BA.pdf)
+is technically not lock-free, it basically behaves as if it were but with less complexity. 
+
+See the [Failed experiments](../failed-experiments.md#the-infamous-concurrent-append-only-b-tree) section
+for the path that led to this choice.
+
+## Details about the Write-Ahead Log
+
+### Files organization
+
+HedgeDB uses a **per-thread WAL file** approach for zero inode contention or file descriptor lock at the
+filesystem level and for write parallelism: NVMe SSDs can easily handle this.
+
+When the database is initially created, a number of WAL files are generated
+with pre-allocated size (`fallocate` with the `KEEP_SIZE` flag), each of
+size `memtable_target_size / num_writer_threads`. 
+
+The total file count is `num_writer_threads * (cfg.max_pending_flushes + 2)`
+(+1 for the currently active WALs and +1 for the WALs associated with the
+Pipelined Memtable).
+
+WAL files are pooled and reused across flushes: this way we
+avoid the repeated overhead of creating, allocating, and deleting files on
+the filesystem, and consequently the need to `fsync` the base directory.
+
+### WAL entry format
+
+Entries are appended following this format:
+
+```
+[seq_nr (8 bytes)]
+[encoded_key_size (1 byte)]
+[key (K bytes)]
+[value_size (2 bytes)]
+[value (V bytes)]
+[xxhash checksum (4 bytes)]
+```
+
+### WALs are buffered and append-only
+
+WALs are opened in `O_APPEND` mode, and currently no Direct I/O switch is available. By default, 
+on disk-write operations the data gets copied to the system-managed buffer that is periodically flushed (hence, the disk
+usage is optimized because writes happen in bulk). With append-mode, WAL file size is also managed by the file-system, via
+metadata updates. Since we focused on performance, no `fsync`ing strategy is available yet when updating the WAL 
+(n.b. RocksDB defaults to `fsync=false`).
+
+### Why not leveraging Direct I/O?
+
+Despite an overall heavy usage of Direct I/O in HedgeDB, and despite it being proven that, for NVMe SSDs, Direct I/O
+is the [optimal choice](../direct-io.md) for write throughput and latency, we preferred going through the
+OS managed buffer. 
+
+Without Direct I/O, there are essentially two alternatives when it comes to 
+appending to the WAL:
+1) Emitting a write call for each insertion;
+2) Buffering data and emitting a `write` call only when the buffer gets filled (mimicking the OS 
+behavior).
+
+About the #1, well that's very slow because we would end up rewriting the same 
+block multiple times; about the #2, in case of application crash, it's easier **to lose data** compared to
+handling the writes to the OS.
+
+### Is `io_uring` helping?
+
+Not really: a synchronous `pwrite` call is used instead of going through the
+`liburing` event loop. This was also experimentally found to be the faster choice.
+
+
+## Fast Writers and Flusher Synchronization with [rw_sync](https://github.com/fede-vaccaro/HedgeDB/blob/b2785cab4d35fe1784eb11ac7de9ae93ce6679c4/src/async/rw_sync.h)
+
+Given the lack of "hard" synchronization primitives (e.g. `mutex`), it might occur that a Flush Job starts running
+while the Memtable it operates on is still being modified by another thread. 
+
+Flush Worker _expects_ that the Memtable is in a Read-Only state, but how do we enforce this constraint, and how can we coordinate
+the writers and the Flush Worker, in a way that is also fast and lightweight?
+
+HedgeDB solves this issue using a custom synchronization structure internally called `rw_sync`, which is a declination
+of the Read-Copy-Update, implemented through distributed Reference Counting: the Reader-Writer Synchronizer, 
+or [rw_sync](https://github.com/fede-vaccaro/HedgeDB/blob/b2785cab4d35fe1784eb11ac7de9ae93ce6679c4/src/async/rw_sync.h).
+
+This concurrency model has already been described:
+- Each thread acquires a **Write Token** before inserting a key-value pair into the Memtable, and release it after,
+- When a Memtable is **frozen**, it's not allowed to acquire Tokens anymore (**frozen != read only**, frozen does not imply that there is **no Token around**)
+- The Flusher waits for every Token to be released
+
+The `rw_sync.h` template object is implemented based on this scheme.
 
 ```cpp
 // include/async/rw_sync.h
 
-struct alignas(64) counter_t {
+struct alignas(CACHE_LINE_SIZE) counter_t {
     std::atomic_int64_t c{0};
 };
 
 template <typename T>
 class rw_sync {
-    T _obj;                              // The protected object (memtable_inner)
-    std::atomic_bool _frozen{false};     // Gatekeeper flag
-    std::vector<counter_t> _counters;    // Per-thread cache-aligned atomic counters
+    T _obj;
+    std::atomic_bool _frozen{false};
+    std::vector<counter_t> _counters;
 };
 ```
 
-At first glance, the vector of counters might look odd. The reason for
-using such "distributed reference counting" is that each thread has its own
-cache aligned counter (false sharing is prevented), and no performance
-degradation due to CPU's
-[Cache coherence protocol](https://en.wikipedia.org/wiki/MESI_protocol)
-occurs, because the counter's cache line is exclusively updated only from
-the Writer thread with the same index.
+The vector of counters represents whether a thread is currently holding a Write Token. 
+Notice that each slot of the `_counters` vector is assigned to **one and one only** thread. This scheme resembles 
+**distributed reference counting**.
 
-The wrapped object `_obj` is acquired/released this way:
+The reason behind not using just a single `std::atomic_uint64`, this way each thread independently owns a 
+**cache line**, and **false sharing** is prevented while acquiring and releasing Write Tokens: no performance degradation 
+due to CPU's [Cache coherence protocol](https://en.wikipedia.org/wiki/MESI_protocol) occurs.
+
+This is how the wrapped object `_obj` is acquired and released (n.b. this is pseudo-C++):
 
 ```text
-// acquire
-if (rw_sync._frozen)
-    return false
+T* acquire() 
+{
+   if (rw_sync._frozen)
+       return nullptr;
+   
+   rw_sync._counters[this_thread_idx] += 1;
+   return &this->_obj;
+}
 
-rw_sync._counters[this_thread_idx] += 1
-return true
-
-// release
-rw_sync._counters[this_thread_idx] -= 1
+void release() 
+{
+    rw_sync._counters[this_thread_idx] -= 1;
+}
 ```
 
-For the flusher, checking that the overall reference count is zero is more
-expensive though:
+On the other side, the Reader (i.e. the Flush Worker) checks the reference counter via polling:
 
 ```text
-rw_sync._frozen = true
+rw_sync._frozen.store(true);
 
-ref_count = sum[c in _counters]
-while(ref_count != 0)
-    ref_count = sum[c in _counters]
-    yield
+auto ref_count = sum[c.load() in this->_counters];
+while(ref_count != 0) 
+{
+    ref_count = sum[c.load() in this->_counters];
+    yield();
+}
+
+// Every token has been released
+// .. Read _obj 
 ```
 
 Note that after the `rw_sync` is *frozen*, the reference count will get to
-zero anytime soon. Either way, this check is performed from the Flusher
-that runs on a background thread (or, "non real-time"), so it is totally
-acceptable.
-
-## Per-thread Write-Ahead Logs
-
-### Files organization
-
-HedgeDB uses a **per-thread WAL** approach for zero inode contention at the
-filesystem level and for write parallelism: NVMe SSDs can easily handle
-this.
-
-When the database is initially created, a number of WAL files are generated
-with preallocated size (`fallocate` with the `KEEP_SIZE` flag), each of
-size `memtable_target_size / num_writer_threads`.
-
-The total file count is `num_writer_threads * (cfg.max_pending_flushes + 2)`
-(+1 for the currently active WALs and +1 for the WALs associated with the
-pipelined memtable).
-
-WAL files are pooled via `tmc::channel` (internally implemented as a
-high-performance async MPMC queue) and reused across flushes: this way we
-avoid the repeated overhead of creating, allocating, and deleting files on
-the filesystem, and consequently the need to `fsync` the base directory.
-
-### Internal structure and usage
-
-Entries are appended as `{seq_nr, key_size, value_size, key, value, checksum}`
-records. On startup, `memtable::replay_wal` reconstructs in-flight writes
-from the most recent WAL epoch.
-
-WAL files are intentionally **not opened with `O_DIRECT`**: writing through
-the page cache means each insert doesn't require a disk round-trip: the OS
-holds the data in RAM and flushes asynchronously. This protects against
-application crashes (the OS still owns the data), though not against power
-loss. It's an acceptable middle ground for the current prototype stage of
-HedgeDB.
-
-A synchronous `pwrite` call is also used instead of going through the
-`liburing` event loop. This was experimentally found to be the faster choice.
-
-:::{warning}
-**Known gap**: Full crash recovery is not yet implemented. WAL replay works,
-but edge cases (partial writes, corrupted files) aren't fully handled.
-:::
+zero in a matter of moments. Either way, this check is performed from the Flusher
+that runs on a background thread. Basically, the overhead is tilted to the Flusher thread: this is not just acceptable,
+but even _desirable_.
 
 ## Permission Chain for concurrency and temporal consistency
 
@@ -213,9 +327,9 @@ The flush procedure has two degrees of concurrency:
 
 1. Each partition can be flushed concurrently (this is experimentally
    proven to be relevant for performance)
-2. Multiple memtable flushes can run in parallel
+2. Multiple Memtable-to-SST flushes can run in parallel (see [Partitioning in HedgeDB](sst.md#key-partitioning-or-sharding))
 
-After the memtable is flushed to SST files, the new SSTs must be added to
+After the Memtable is flushed to SST files, the new SSTs must be added to
 the LSM tree **in chronological order**. Inspired by
 [this article](https://destel.dev/blog/preserving-order-in-concurrent-go),
 HedgeDB uses a **semaphore-based permission chain**:
@@ -248,3 +362,9 @@ This creates a **serialized chain** where flush N+1 cannot publish its SSTs
 until flush N completes. This ensures SST epoch ordering is preserved.
 
 A similar scheme is used for parallel compaction *within* the same partition.
+
+## Summary
+
+In this section we explored in detail how HedgeDB provides great insertion performance. This is achieved by leveraging
+a high-performance Concurrent Skiplist, per-thread WAL files, and lightweight synchronization methods inspired from
+lock-free programming techniques.
