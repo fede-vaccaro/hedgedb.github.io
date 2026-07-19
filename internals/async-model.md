@@ -10,8 +10,6 @@ scheduler. Every I/O operation is a coroutine that:
 3. Resumes when the CQE (Completion Queue Entry) arrives, by posting the
    task back on the executor.
 
-**No callbacks.** Just sequential-looking code.
-
 Unhappy with the state of the coroutine-based libraries available in C++,
 for a long time I stuck to a simple in house-made threadpool, until it
 happened that I found `TooManyCooks` while browsing Reddit (see the *Failed

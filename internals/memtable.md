@@ -141,7 +141,7 @@ spent waiting is negligible.
 #### 2. Flush to SST
 
 The Flush Worker actually writes the Memtable to disk. The process consists of iterating for every key-value (the Skiplist is
-already ordered) and progressively building the SSTs Index Blocks.
+already ordered) and progressively building the SSTs Data Blocks.
 
 #### 3. Wait for permission for pushing to L0
 

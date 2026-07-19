@@ -73,8 +73,8 @@ But for write-heavy workloads, this is a winning bet.
 
 #### Sorted String Table files
 
-Each SST file is organized in *index blocks* typically of 4 KiB size. A
-**second-level index** (containing one representative key per index block)
+Each SST file is organized in *data blocks* typically of 4 KiB size. A
+**second-level index** (containing one representative key per data block)
 is pinned in memory. This enables a cheap binary search to locate the right
 page before any disk I/O. This design allows exactly **one random I/O per
 SST** for point lookup/iterator seek.
@@ -142,8 +142,8 @@ the most recent value associated with a key:
     - Probe the **AMQ filter** to skip files that can't contain the key
     - Binary-search the in-memory **second-level index** to find the index
       block position where the key could reside
-    - Fetch the index block page (usually 4KB) from filesystem
-    - Decode the index block and search it
+    - Fetch the data block page (usually 4KB) from filesystem
+    - Decode the data block and search it
     - First match wins. If it's not found, or the value is a tombstone,
       return `KEY_NOT_FOUND`
 
@@ -163,6 +163,6 @@ These are the standard LSM-tree building blocks. The internals section covers ho
 
 - **[Async model](internals/async-model.md):** every I/O is a `co_await` backed by `io_uring`; no callbacks, no thread-per-request.
 - **[Memtable & WAL](internals/memtable.md):** double-buffered memtable with a custom `rw_sync` primitive; per-thread WAL files to eliminate inode contention.
-- **[SST & partitioning](internals/sst.md):** prefix-compressed 4 KB index blocks, quotient filters, and a partitioned key space for parallel flush and compaction.
+- **[SST & partitioning](internals/sst.md):** prefix-compressed 4 KB data blocks, quotient filters, and a partitioned key space for parallel flush and compaction.
 - **[Compaction](internals/compaction.md):** size-tiered strategy with a semaphore-based permission chain to keep parallel compactions temporally consistent.
 - **[Direct I/O](direct-io.md):** `O_DIRECT` on the SST path for predictable latencies and transparent memory usage.

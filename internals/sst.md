@@ -6,9 +6,9 @@ Each SST file is structured this way:
 
 ```text
 ┌──────────────────────────────────────┐
-│  index blocks                        │  ← array 4 KiB pages, contains sorted key values
+│  data blocks                         │  ← array 4 KiB pages, contains sorted key values
 ├──────────────────────────────────────┤
-│  second level index                  │  ← one key per index block page
+│  second level index                  │  ← one key per data block page
 ├──────────────────────────────────────┤
 │  filter                              │  ← probabilistic membership filter
 ├──────────────────────────────────────┤
@@ -20,10 +20,10 @@ Once flushed, SST files are **immutable** and can only be deleted after being **
 
 ### Second level Index
 
-The **second level index** is an array of sorted keys. Each index block of
-the core index is represented from its greatest key, thus there is a 1-to-1
-positional mapping between a second level index entry and an index block: a `lower_bound()` binary search allows to identify the block a record *could* resides into.
-
+The **second level index** is an array of sorted keys. Each data block of
+is represented from its greatest key, thus there is a 1-to-1
+positional mapping between a second level index entry and a data block: a binary search allows
+to identify the block a record *could* resides into.
 
 ### Approximate Probabilistic Membership filters
 
@@ -42,7 +42,7 @@ The **SST Lookup flow** is pretty straightforward:
 1. Probe filter
    - If false return KEY_NOT_FOUND
 2. Binary search the second level index
-3. Identify the index block page
+3. Identify the correct data block page
 4. Fetch page from disk
 5. Linear scan looking for the key.
 ```
@@ -52,9 +52,9 @@ In order to guarantee a single page load (1-random IO Operation) on point lookup
 - The second level index is always pinned in primary memory.
 - **Key uniqueness**: Within a single SST, a key is unique.
 
-Without the latter, it cannot be guaranteed that a second-level-index entry maps to a single index block. **Key Uniqueness** has also implications on the MVCC implementation strategy.
+Without the latter, it cannot be guaranteed that a second-level-index entry maps to a single index block. **Key Uniqueness (within the same SST)** has also more implications on the MVCC implementation strategy.
 
-## Index Block layout
+## Data Block layout
 
 HedgeDB uses 4 KB index-blocks, and the block format implements prefix
 compression with restart points.
@@ -96,7 +96,7 @@ does not need decoding.
 The middle-ground solution that HedgeDB applies is to use **multiple
 restart groups** within the same block.
 
-Finally, at the end of the index block, the following information is stored:
+Finally, at the end of the data block, the following information is stored:
 
 - The offsets pointing to every restart group leader (2 bytes each)
 - The offset count (2 bytes)

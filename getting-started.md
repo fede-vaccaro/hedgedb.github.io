@@ -231,7 +231,7 @@ isn't there yet:
 - **Batched operations**: batched writes and reads to amortize overheads.
 - **Column family support**: no explicit column family support.
 - **Large values support**: if `key.size() + value.size()` exceeds the
-  index block page size, compaction will break.
+  maximum data block page size, compaction will break.
 
 **Possible future features**:
 
